@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"time"
 
@@ -35,6 +36,68 @@ type rendererImpl struct {
 	cancel context.CancelFunc
 	cdp    *chromedp.CDP
 	closed bool
+}
+
+func newRunner(ctx context.Context, execPath string, headless bool) (*runner.Runner, int, error) {
+	channel := make(chan string, 1)
+	findWsRegex := regexp.MustCompile("^DevTools listening on (ws://.*)$")
+
+	runner, err := runner.New(
+		runner.Path(execPath),
+		runner.StartURL("about:blank"),
+		runner.Flag("no-sandbox", true),
+		runner.Flag("headless", headless),
+		runner.Flag("disable-gpu", true),
+		runner.Flag("disable-background-networking", true),
+		runner.Flag("disable-background-timer-throttling", true),
+		runner.Flag("disable-client-side-phishing-detection", true),
+		runner.Flag("disable-default-apps", true),
+		runner.Flag("disable-extensions", true),
+		runner.Flag("disable-hang-monitor", true),
+		runner.Flag("disable-popup-blocking", true),
+		runner.Flag("disable-prompt-on-repost", true),
+		runner.Flag("disable-sync", true),
+		runner.Flag("disable-translate", true),
+		runner.Flag("metrics-recording-only", true),
+		runner.Flag("no-first-run", true),
+		runner.Flag("remote-debugging-port", 0),
+		runner.Flag("safebrowsing-disable-auto-update", true),
+		runner.Flag("enable-automation", true),
+		runner.Flag("password-store=basic", true),
+		runner.Flag("use-mock-keychain", true),
+		runner.Flag("headless", true),
+		runner.Flag("disable-gpu", true),
+		runner.Flag("hide-scrollbars", true),
+		runner.Flag("mute-audio", true),
+		runner.CmdOpt(func(cmd *exec.Cmd) error {
+			cmd.Stdout = log.NewLogWriter(chromeLog, log.LvlDebug, "[stdout] ")
+			cmd.Stderr = NewFindStringWriter(channel, findWsRegex, log.NewLogWriter(chromeLog, log.LvlDebug, "[stderr] "))
+
+			return nil
+		}),
+	)
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = runner.Start(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// wait for ws
+	ws := ""
+	select {
+	case ws = <-channel:
+		break
+	case <-time.After(time.Second * 1):
+		return nil, 0, errors.New("Timeout waiting for ws:// output from chrome")
+	}
+
+	rendererLog.Debug("Found websocket URL", "ws", ws)
+
+	return runner, 0, nil
 }
 
 func NewRenderer(execPath string, headless bool) (Renderer, error) {
